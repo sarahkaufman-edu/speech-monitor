@@ -1,0 +1,222 @@
+<!-- Speech Monitor Widget (client-side, no server needed) -->
+<div id="speech-monitor" style="font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; max-width: 520px; border: 1px solid #ddd; border-radius: 12px; padding: 16px;">
+  <h3 style="margin: 0 0 10px 0;">Speech Monitor</h3>
+
+  <div style="display:flex; gap:10px; flex-wrap:wrap; margin-bottom: 10px;">
+    <button id="sm-start" style="padding:10px 12px; border-radius:10px; border:1px solid #ccc; background:#fff; cursor:pointer;">Start</button>
+    <button id="sm-stop"  style="padding:10px 12px; border-radius:10px; border:1px solid #ccc; background:#fff; cursor:pointer;" disabled>Stop</button>
+    <button id="sm-reset" style="padding:10px 12px; border-radius:10px; border:1px solid #ccc; background:#fff; cursor:pointer;">Reset</button>
+
+    <label style="display:flex; align-items:center; gap:8px; margin-left:auto;">
+      Language
+      <select id="sm-lang" style="padding:8px; border-radius:10px; border:1px solid #ccc;">
+        <option value="en-US" selected>English (US)</option>
+        <option value="en-GB">English (UK)</option>
+        <option value="es-ES">Spanish (ES)</option>
+        <option value="fr-FR">French (FR)</option>
+        <option value="de-DE">German (DE)</option>
+      </select>
+    </label>
+  </div>
+
+  <div style="display:grid; grid-template-columns: 1fr 1fr 1fr; gap:10px; margin-bottom: 12px;">
+    <div style="border:1px solid #eee; border-radius:12px; padding:10px;">
+      <div style="font-size:12px; color:#666;">Total words</div>
+      <div id="sm-total" style="font-size:24px; font-weight:700;">0</div>
+    </div>
+    <div style="border:1px solid #eee; border-radius:12px; padding:10px;">
+      <div style="font-size:12px; color:#666;">WPM (avg)</div>
+      <div id="sm-wpm" style="font-size:24px; font-weight:700;">0</div>
+    </div>
+    <div style="border:1px solid #eee; border-radius:12px; padding:10px;">
+      <div style="font-size:12px; color:#666;">Time</div>
+      <div id="sm-time" style="font-size:24px; font-weight:700;">0:00</div>
+    </div>
+  </div>
+
+  <div style="border:1px solid #eee; border-radius:12px; padding:10px; min-height: 110px;">
+    <div style="font-size:12px; color:#666; margin-bottom:6px;">Transcript</div>
+    <div id="sm-transcript" style="white-space:pre-wrap; line-height:1.35;"></div>
+    <div id="sm-interim" style="white-space:pre-wrap; line-height:1.35; color:#888;"></div>
+  </div>
+
+  <div id="sm-status" style="margin-top:10px; font-size:12px; color:#666;"></div>
+</div>
+
+<script>
+(() => {
+  const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+
+  const elStart = document.getElementById('sm-start');
+  const elStop = document.getElementById('sm-stop');
+  const elReset = document.getElementById('sm-reset');
+  const elLang = document.getElementById('sm-lang');
+
+  const elTotal = document.getElementById('sm-total');
+  const elWpm = document.getElementById('sm-wpm');
+  const elTime = document.getElementById('sm-time');
+  const elTranscript = document.getElementById('sm-transcript');
+  const elInterim = document.getElementById('sm-interim');
+  const elStatus = document.getElementById('sm-status');
+
+  if (!SpeechRecognition) {
+    elStatus.textContent = "Speech Recognition not supported in this browser. Try Chrome or Edge.";
+    elStart.disabled = true;
+    return;
+  }
+
+  let recognition = null;
+  let isRunning = false;
+
+  let startTs = null;
+  let timer = null;
+
+  // We'll store final recognized text chunks and count words from those.
+  let finalText = "";
+  let totalWords = 0;
+
+  function countWords(text) {
+    // Counts word-like tokens. Adjust if you want stricter/looser definition.
+    const trimmed = text.trim();
+    if (!trimmed) return 0;
+    return trimmed.split(/\s+/).filter(Boolean).length;
+  }
+
+  function formatTime(ms) {
+    const s = Math.max(0, Math.floor(ms / 1000));
+    const m = Math.floor(s / 60);
+    const r = s % 60;
+    return `${m}:${String(r).padStart(2, '0')}`;
+  }
+
+  function updateStats() {
+    const now = Date.now();
+    const elapsedMs = startTs ? (now - startTs) : 0;
+    elTime.textContent = formatTime(elapsedMs);
+
+    const minutes = elapsedMs / 60000;
+    const wpm = minutes > 0 ? Math.round(totalWords / minutes) : 0;
+    elTotal.textContent = String(totalWords);
+    elWpm.textContent = String(wpm);
+  }
+
+  function setStatus(msg) {
+    elStatus.textContent = msg;
+  }
+
+  function createRecognition() {
+    const r = new SpeechRecognition();
+    r.lang = elLang.value;
+    r.continuous = true;      // keep listening
+    r.interimResults = true;  // show partial results
+
+    r.onstart = () => setStatus("Listening…");
+    r.onerror = (e) => setStatus(`Error: ${e.error}`);
+    r.onend = () => {
+      // Some browsers stop automatically after pauses. If user still "running", restart.
+      if (isRunning) {
+        try { r.start(); } catch (_) {}
+      } else {
+        setStatus("Stopped.");
+      }
+    };
+
+    r.onresult = (event) => {
+      let interim = "";
+
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        const res = event.results[i];
+        const text = res[0].transcript;
+
+        if (res.isFinal) {
+          // Append final text and update counts based on the delta
+          // (only count newly-finalized words, not interim).
+          finalText += (finalText && !finalText.endsWith(" ") ? " " : "") + text.trim();
+        } else {
+          interim += text;
+        }
+      }
+
+      // Recompute totalWords from finalText (simplest & robust vs. duplicates)
+      totalWords = countWords(finalText);
+
+      elTranscript.textContent = finalText;
+      elInterim.textContent = interim.trim();
+
+      updateStats();
+    };
+
+    return r;
+  }
+
+  function start() {
+    if (isRunning) return;
+    isRunning = true;
+
+    recognition = createRecognition();
+
+    startTs = Date.now();
+    updateStats();
+
+    timer = setInterval(updateStats, 250);
+
+    elStart.disabled = true;
+    elStop.disabled = false;
+
+    try {
+      recognition.start();
+      setStatus("Requesting microphone permission…");
+    } catch (e) {
+      setStatus("Could not start recognition. Make sure this page is HTTPS and you clicked Start.");
+      isRunning = false;
+      elStart.disabled = false;
+      elStop.disabled = true;
+      clearInterval(timer);
+      timer = null;
+    }
+  }
+
+  function stop() {
+    if (!isRunning) return;
+    isRunning = false;
+
+    elStart.disabled = false;
+    elStop.disabled = true;
+
+    if (timer) {
+      clearInterval(timer);
+      timer = null;
+    }
+
+    if (recognition) {
+      try { recognition.stop(); } catch (_) {}
+    }
+  }
+
+  function reset() {
+    finalText = "";
+    totalWords = 0;
+    elTranscript.textContent = "";
+    elInterim.textContent = "";
+    elTotal.textContent = "0";
+    elWpm.textContent = "0";
+    elTime.textContent = "0:00";
+    setStatus(isRunning ? "Listening…" : "Ready.");
+    if (isRunning) startTs = Date.now();
+  }
+
+  elStart.addEventListener('click', start);
+  elStop.addEventListener('click', stop);
+  elReset.addEventListener('click', reset);
+
+  elLang.addEventListener('change', () => {
+    // Changing language requires restarting recognition if running.
+    if (isRunning) {
+      stop();
+      start();
+    }
+  });
+
+  setStatus("Ready. Click Start to begin.");
+})();
+</script>
